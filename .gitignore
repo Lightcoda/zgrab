@@ -25,3 +25,6 @@ build/*
 dist/*
 
 .vscode/*
+
+# Windows Zone.Identifier metadata
+*:Zone.Identifier
