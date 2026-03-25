@@ -57,6 +57,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/zmap/zgrab2"
@@ -72,8 +73,8 @@ type Flags struct {
 	UseUDP bool `long:"udp" description:"Use UDP transport (default is TCP)"`
 	UseTLS bool `long:"tls" description:"Use TLS transport (SIPS). Implies TCP."`
 
-	// SIP method
-	Method string `long:"method" default:"OPTIONS" description:"SIP method to use: OPTIONS, REGISTER, or INVITE"`
+	// SIP method(s) — comma-separated list, e.g. "OPTIONS,REGISTER,INVITE"
+	Method string `long:"method" default:"OPTIONS" description:"SIP method(s), comma-separated: OPTIONS, REGISTER, INVITE (e.g. OPTIONS,REGISTER)"`
 
 	// SIP URI/header fields
 	From    string `long:"from" description:"SIP From URI (e.g. sip:scanner@example.com). Auto-generated if empty."`
@@ -101,13 +102,22 @@ type Scanner struct {
 	config *Flags
 }
 
+// MethodResult holds the result of a single SIP method request.
+type MethodResult struct {
+	Method      string       `json:"method"`
+	Response    *SIPResponse `json:"response,omitempty"`
+	Fingerprint *ProductInfo `json:"fingerprint,omitempty"`
+	RawRequest  string       `json:"raw_request,omitempty" zgrab:"debug"`
+	RawResponse string       `json:"raw_response,omitempty" zgrab:"debug"`
+	Error       string       `json:"error,omitempty"`
+}
+
 // Results is the top-level result returned by the SIP scan.
 type Results struct {
-	Response  *SIPResponse `json:"response,omitempty"`
-	Transport string       `json:"transport,omitempty"`
-	TLSLog    *zgrab2.TLSLog `json:"tls,omitempty"`
-	RawRequest  string `json:"raw_request,omitempty" zgrab:"debug"`
-	RawResponse string `json:"raw_response,omitempty" zgrab:"debug"`
+	// Responses holds one entry per requested method (preserves order).
+	Responses []*MethodResult `json:"responses,omitempty"`
+	Transport string          `json:"transport,omitempty"`
+	TLSLog    *zgrab2.TLSLog  `json:"tls,omitempty"`
 }
 
 // RegisterModule is called by modules/sip.go to register the SIP scanner.
@@ -134,13 +144,32 @@ func (m *Module) Description() string {
 	return "Send SIP requests (OPTIONS/REGISTER/INVITE) and parse structured responses for security analysis"
 }
 
+// Methods returns the list of SIP methods parsed from the comma-separated flag.
+func (f *Flags) Methods() []string {
+	raw := strings.Split(f.Method, ",")
+	out := make([]string, 0, len(raw))
+	for _, m := range raw {
+		m = strings.TrimSpace(strings.ToUpper(m))
+		if m != "" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // Validate checks that the flags are consistent.
 func (f *Flags) Validate(args []string) error {
-	switch f.Method {
-	case "OPTIONS", "REGISTER", "INVITE":
-		// valid
-	default:
-		return fmt.Errorf("unsupported SIP method %q: must be OPTIONS, REGISTER, or INVITE", f.Method)
+	methods := f.Methods()
+	if len(methods) == 0 {
+		return fmt.Errorf("at least one SIP method is required")
+	}
+	for _, m := range methods {
+		switch m {
+		case "OPTIONS", "REGISTER", "INVITE":
+			// valid
+		default:
+			return fmt.Errorf("unsupported SIP method %q: must be OPTIONS, REGISTER, or INVITE", m)
+		}
 	}
 	if f.UseTLS && f.UseUDP {
 		return fmt.Errorf("--tls and --udp are mutually exclusive")
@@ -181,30 +210,77 @@ func (s *Scanner) Protocol() string {
 }
 
 // Scan performs the SIP scan against the target.
+// When multiple methods are specified (e.g. OPTIONS,REGISTER), each is sent
+// sequentially and results are collected per method.
 func (s *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error) {
-	// Build the SIP request
-	reqBytes, err := BuildSIPRequest(s.config, target)
-	if err != nil {
-		return zgrab2.SCAN_UNKNOWN_ERROR, nil, fmt.Errorf("building SIP request: %w", err)
-	}
+	methods := s.config.Methods()
 
-	results := &Results{
-		RawRequest: string(reqBytes),
-	}
+	results := &Results{}
 
-	// Determine transport
+	// Determine transport label
 	if s.config.UseTLS {
 		results.Transport = "tls"
-		return s.scanTLS(target, reqBytes, results)
 	} else if s.config.UseUDP {
 		results.Transport = "udp"
-		return s.scanUDP(target, reqBytes, results)
+	} else {
+		results.Transport = "tcp"
 	}
-	results.Transport = "tcp"
-	return s.scanTCP(target, reqBytes, results)
+
+	overallStatus := zgrab2.SCAN_SUCCESS
+	var overallErr error
+
+	for _, method := range methods {
+		mr := &MethodResult{Method: method}
+
+		// Build a per-method copy of flags so BuildSIPRequest uses the right method
+		methodFlags := *s.config
+		methodFlags.Method = method
+
+		reqBytes, err := BuildSIPRequest(&methodFlags, target)
+		if err != nil {
+			mr.Error = fmt.Sprintf("building request: %v", err)
+			results.Responses = append(results.Responses, mr)
+			overallStatus = zgrab2.SCAN_UNKNOWN_ERROR
+			overallErr = err
+			continue
+		}
+		mr.RawRequest = string(reqBytes)
+
+		// Send and receive
+		var status zgrab2.ScanStatus
+		var resp *SIPResponse
+		var rawResp string
+
+		switch results.Transport {
+		case "tls":
+			status, resp, rawResp, err = s.doScanTLS(target, reqBytes, results)
+		case "udp":
+			status, resp, rawResp, err = s.doScanUDP(target, reqBytes)
+		default:
+			status, resp, rawResp, err = s.doScanTCP(target, reqBytes)
+		}
+
+		mr.RawResponse = rawResp
+		if err != nil {
+			mr.Error = err.Error()
+			if overallStatus == zgrab2.SCAN_SUCCESS {
+				overallStatus = status
+				overallErr = err
+			}
+		}
+		if resp != nil {
+			mr.Response = resp
+			mr.Fingerprint = FingerprintSIPResponse(resp)
+		}
+
+		results.Responses = append(results.Responses, mr)
+	}
+
+	return overallStatus, results, overallErr
 }
 
-func (s *Scanner) scanUDP(target zgrab2.ScanTarget, req []byte, results *Results) (zgrab2.ScanStatus, any, error) {
+// doScanUDP sends req over UDP and returns the parsed response, raw bytes, and any error.
+func (s *Scanner) doScanUDP(target zgrab2.ScanTarget, req []byte) (zgrab2.ScanStatus, *SIPResponse, string, error) {
 	readTimeout := time.Duration(s.config.ReadTimeout) * time.Millisecond
 
 	var lastErr error
@@ -215,7 +291,6 @@ func (s *Scanner) scanUDP(target zgrab2.ScanTarget, req []byte, results *Results
 			continue
 		}
 
-		// Set deadline for write+read
 		conn.SetDeadline(time.Now().Add(readTimeout))
 
 		_, err = conn.Write(req)
@@ -234,75 +309,74 @@ func (s *Scanner) scanUDP(target zgrab2.ScanTarget, req []byte, results *Results
 		}
 
 		raw := buf[:n]
-		results.RawResponse = string(raw)
 		resp, parseErr := ParseSIPResponse(raw)
 		if parseErr != nil {
-			return zgrab2.SCAN_PROTOCOL_ERROR, results, parseErr
+			return zgrab2.SCAN_PROTOCOL_ERROR, nil, string(raw), parseErr
 		}
-		results.Response = resp
-		return zgrab2.SCAN_SUCCESS, results, nil
+		return zgrab2.SCAN_SUCCESS, resp, string(raw), nil
 	}
-	return zgrab2.TryGetScanStatus(lastErr), results, lastErr
+	return zgrab2.TryGetScanStatus(lastErr), nil, "", lastErr
 }
 
-func (s *Scanner) scanTCP(target zgrab2.ScanTarget, req []byte, results *Results) (zgrab2.ScanStatus, any, error) {
+// doScanTCP sends req over TCP and returns the parsed response.
+func (s *Scanner) doScanTCP(target zgrab2.ScanTarget, req []byte) (zgrab2.ScanStatus, *SIPResponse, string, error) {
 	conn, err := target.Open(&s.config.BaseFlags)
 	if err != nil {
-		return zgrab2.TryGetScanStatus(err), nil, err
+		return zgrab2.TryGetScanStatus(err), nil, "", err
 	}
 	defer conn.Close()
 
-	return s.scanStream(conn, req, results)
+	return s.doScanStream(conn, req)
 }
 
-func (s *Scanner) scanTLS(target zgrab2.ScanTarget, req []byte, results *Results) (zgrab2.ScanStatus, any, error) {
+// doScanTLS sends req over TLS and returns the parsed response.
+// It also populates results.TLSLog on successful handshake.
+func (s *Scanner) doScanTLS(target zgrab2.ScanTarget, req []byte, results *Results) (zgrab2.ScanStatus, *SIPResponse, string, error) {
 	conn, err := target.Open(&s.config.BaseFlags)
 	if err != nil {
-		return zgrab2.TryGetScanStatus(err), nil, err
+		return zgrab2.TryGetScanStatus(err), nil, "", err
 	}
 
 	tlsConn, err := s.config.TLSFlags.GetTLSConnectionForTarget(conn, &target)
 	if err != nil {
 		conn.Close()
-		return zgrab2.TryGetScanStatus(err), nil, err
+		return zgrab2.TryGetScanStatus(err), nil, "", err
 	}
 	if err = tlsConn.Handshake(); err != nil {
 		tlsConn.Close()
-		return zgrab2.TryGetScanStatus(err), results, err
+		return zgrab2.TryGetScanStatus(err), nil, "", err
 	}
 	results.TLSLog = tlsConn.GetLog()
 
-	status, r, scanErr := s.scanStream(tlsConn, req, results)
+	status, resp, rawResp, scanErr := s.doScanStream(tlsConn, req)
 	tlsConn.Close()
-	return status, r, scanErr
+	return status, resp, rawResp, scanErr
 }
 
-func (s *Scanner) scanStream(conn net.Conn, req []byte, results *Results) (zgrab2.ScanStatus, any, error) {
+// doScanStream performs the write/read cycle on a stream (TCP or TLS) connection.
+func (s *Scanner) doScanStream(conn net.Conn, req []byte) (zgrab2.ScanStatus, *SIPResponse, string, error) {
 	readTimeout := time.Duration(s.config.ReadTimeout) * time.Millisecond
 
 	_, err := conn.Write(req)
 	if err != nil {
-		return zgrab2.TryGetScanStatus(err), results, err
+		return zgrab2.TryGetScanStatus(err), nil, "", err
 	}
 
-	// Read response: use ReadAvailableWithOptions for stream-based reading
 	data, err := zgrab2.ReadAvailableWithOptions(conn, 8209, readTimeout, 0, 65535)
 	if err != nil && err != io.EOF {
 		if len(data) == 0 {
-			return zgrab2.TryGetScanStatus(err), results, err
+			return zgrab2.TryGetScanStatus(err), nil, "", err
 		}
-		// We have some data despite the error; try to parse it
 	}
 
 	if len(data) == 0 {
-		return zgrab2.SCAN_IO_TIMEOUT, results, fmt.Errorf("no response received")
+		return zgrab2.SCAN_IO_TIMEOUT, nil, "", fmt.Errorf("no response received")
 	}
 
-	results.RawResponse = string(data)
+	rawStr := string(data)
 	resp, parseErr := ParseSIPResponse(data)
 	if parseErr != nil {
-		return zgrab2.SCAN_PROTOCOL_ERROR, results, parseErr
+		return zgrab2.SCAN_PROTOCOL_ERROR, nil, rawStr, parseErr
 	}
-	results.Response = resp
-	return zgrab2.SCAN_SUCCESS, results, nil
+	return zgrab2.SCAN_SUCCESS, resp, rawStr, nil
 }
