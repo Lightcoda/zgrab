@@ -104,8 +104,8 @@ func buildFingerprintDB() []fingerprint {
 			category:    "PBX",
 			possiblevendors: []string{"sangoma"},
 			headerPatterns: map[string]*regexp.Regexp{
-				"server":     regexp.MustCompile(`(?i)(f(?:ree)?PBX[\s/-]*)?((?P<version>[\d]+(?:\.[\d]+)*)\([\d]+(?:\.[\d]+)*\))?`),
-				"user-agent": regexp.MustCompile(`(?i)(f(?:ree)?PBX[\s/-]*)?((?P<version>[\d]+(?:\.[\d]+)*)\([\d]+(?:\.[\d]+)*\))?`),
+				"server":     regexp.MustCompile(`(?i)(f(?:ree)?PBX)[\s/-]*((?P<version>[\d]+(?:\.[\d]+)*)\([\d]+(?:\.[\d]+)*\))?`),
+				"user-agent": regexp.MustCompile(`(?i)(f(?:ree)?PBX)[\s/-]*((?P<version>[\d]+(?:\.[\d]+)*)\([\d]+(?:\.[\d]+)*\))?`),
 			},
 		},
 		// ===== VoIP Platforms =====
