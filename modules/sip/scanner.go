@@ -14,6 +14,7 @@
 //	echo "192.168.1.1" | zgrab2 sip --port 5060 --method OPTIONS --udp
 //	echo "192.168.1.1" | zgrab2 sip --port 5061 --method REGISTER --tls --from "sip:scanner@example.com"
 //	echo "192.168.1.1" | zgrab2 sip --port 5060 --method INVITE --domain example.com --user alice
+//	echo "192.168.1.1" | zgrab2 sip --port 5060 --method OPTIONS --retls
 //
 // Example JSON output (abbreviated):
 //
@@ -63,6 +64,9 @@ import (
 	"github.com/zmap/zgrab2"
 )
 
+const defaultSIPPort  uint = 5060
+const defaultSIPSPort uint = 5061
+
 // Flags contains the command-line flags for the SIP module.
 type Flags struct {
 	zgrab2.BaseFlags `group:"Basic Options"`
@@ -72,6 +76,7 @@ type Flags struct {
 	// Transport selection
 	UseUDP bool `long:"udp" description:"Use UDP transport (default is TCP)"`
 	UseTLS bool `long:"tls" description:"Use TLS transport (SIPS). Implies TCP."`
+	RetryTLS bool `long:"retls" description:"If TCP scan fails, retry with TLS: first same port, else 5061"`
 
 	// SIP method(s) — comma-separated list, e.g. "OPTIONS,REGISTER,INVITE"
 	Method string `long:"method" default:"OPTIONS" description:"SIP method(s), comma-separated: OPTIONS, REGISTER, INVITE (e.g. OPTIONS,REGISTER)"`
@@ -110,6 +115,8 @@ type MethodResult struct {
 	RawRequest  string       `json:"raw_request,omitempty" zgrab:"debug"`
 	RawResponse string       `json:"raw_response,omitempty" zgrab:"debug"`
 	Error       string       `json:"error,omitempty"`
+	RetryTLSUsed bool        `json:"retry_tls_used,omitempty"`
+	RetryTLSPort uint        `json:"retry_tls_port,omitempty"`
 }
 
 // Results is the top-level result returned by the SIP scan.
@@ -174,6 +181,12 @@ func (f *Flags) Validate(args []string) error {
 	if f.UseTLS && f.UseUDP {
 		return fmt.Errorf("--tls and --udp are mutually exclusive")
 	}
+	if f.RetryTLS && f.UseUDP {
+		return fmt.Errorf("--tls and --udp are mutually exclusive")
+	}
+	if f.UseTLS && f.RetryTLS {
+		return fmt.Errorf("--tls is already set")
+	}
 	return nil
 }
 
@@ -216,7 +229,7 @@ func (s *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error)
 	methods := s.config.Methods()
 
 	results := &Results{}
-
+	
 	// Determine transport label
 	if s.config.UseTLS {
 		results.Transport = "tls"
@@ -272,11 +285,129 @@ func (s *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error)
 			mr.Response = resp
 			mr.Fingerprint = FingerprintSIPResponse(resp)
 		}
+		//conditional for flag: prev flag is tcp, it`s` failed, --retls set
+		if results.Transport == "tcp" && s.config.RetryTLS && err != nil {
+			tcpErr := err
+
+
+			currentPort := s.config.BaseFlags.Port
+			if target.Port != nil {
+				currentPort = *target.Port
+			}
+			//regenerate request with new data, else server will reject the duplicate
+			tlsReq, buildErr := BuildSIPRequestWithTransport(&methodFlags, target, "TLS")
+			if buildErr == nil {
+				tlsStatus, tlsResp, tlsRaw, tlsErr := s.doScanTLSOnPort(
+					target, tlsReq, results, currentPort,
+				)
+				if tlsErr == nil {
+					s.applyRetrySuccess(mr, results, tlsReq, tlsResp, tlsRaw, tlsStatus, currentPort, tcpErr, &overallStatus, &overallErr)
+					results.Responses = append(results.Responses, mr)
+					continue
+				}
+
+				if currentPort == defaultSIPPort {
+					tlsReq2, buildErr2 := BuildSIPRequestWithTransport(&methodFlags, target, "TLS")
+					if buildErr2 == nil {
+						tlsStatus2, tlsResp2, tlsRaw2, tlsErr2 := s.doScanTLSOnPort(
+							target, tlsReq2, results, defaultSIPSPort,
+						)
+						if tlsErr2 == nil {
+
+							s.applyRetrySuccess(mr, results, tlsReq2, tlsResp2, tlsRaw2, tlsStatus2, defaultSIPSPort, tcpErr, &overallStatus, &overallErr)
+							results.Responses = append(results.Responses, mr)
+							continue
+						}
+
+						mr.Error = fmt.Sprintf(
+							"tcp port %d: %v; tls port %d: %v; tls port %d: %v",
+							currentPort, tcpErr,
+							currentPort, tlsErr,
+							defaultSIPSPort, tlsErr2,
+						)
+						mr.RetryTLSUsed = true
+					}
+				} else {
+
+					mr.Error = fmt.Sprintf(
+						"tcp port %d: %v; tls port %d: %v",
+						currentPort, tcpErr,
+						currentPort, tlsErr,
+					)
+					mr.RetryTLSUsed = true
+				}
+			}
+		}
+
 
 		results.Responses = append(results.Responses, mr)
 	}
 
 	return overallStatus, results, overallErr
+}
+//func rewrite tcp error to tls result 
+func (s *Scanner) applyRetrySuccess(
+	mr *MethodResult,
+	results *Results,
+	tlsReq []byte,
+	tlsResp *SIPResponse,
+	tlsRaw string,
+	tlsStatus zgrab2.ScanStatus,
+	port uint,
+	tcpErr error,
+	overallStatus *zgrab2.ScanStatus,
+	overallErr *error,
+) {
+	mr.Response = tlsResp
+	mr.RawRequest = string(tlsReq)
+	mr.RawResponse = tlsRaw
+	mr.Error = ""
+	mr.RetryTLSUsed = true
+	mr.RetryTLSPort = port
+	mr.Fingerprint = FingerprintSIPResponse(tlsResp)
+
+	results.Transport = "tls"
+
+	if *overallErr == tcpErr {
+		*overallStatus = tlsStatus
+		*overallErr = nil
+	}
+}
+
+func (s *Scanner) doScanTLSOnPort(
+	target zgrab2.ScanTarget,
+	req []byte,
+	results *Results,
+	port uint,
+) (zgrab2.ScanStatus, *SIPResponse, string, error) {
+
+	portCopy := port
+	targetCopy := target
+	targetCopy.Port = &portCopy
+
+	baseFlags := s.config.BaseFlags
+	baseFlags.Port = port
+
+	conn, err := targetCopy.Open(&baseFlags)
+	if err != nil {
+		return zgrab2.TryGetScanStatus(err), nil, "", err
+	}
+
+	// TLS handshake
+	tlsConn, err := s.config.TLSFlags.GetTLSConnectionForTarget(conn, &targetCopy)
+	if err != nil {
+		conn.Close()
+		return zgrab2.TryGetScanStatus(err), nil, "", err
+	}
+	if err = tlsConn.Handshake(); err != nil {
+		tlsConn.Close()
+		return zgrab2.TryGetScanStatus(err), nil, "", err
+	}
+	results.TLSLog = tlsConn.GetLog()
+
+	status, resp, rawResp, scanErr := s.doScanStream(tlsConn, req)
+	tlsConn.Close()
+	return status, resp, rawResp, scanErr
 }
 
 // doScanUDP sends req over UDP and returns the parsed response, raw bytes, and any error.

@@ -11,40 +11,6 @@ import (
 
 // BuildSIPRequest constructs a raw SIP request message based on the given flags and target.
 func BuildSIPRequest(flags *Flags, target zgrab2.ScanTarget) ([]byte, error) {
-	host := target.Host()
-	domain := flags.Domain
-	if domain == "" {
-		domain = host
-	}
-	user := flags.User
-
-	// Build Request-URI
-	requestURI := fmt.Sprintf("sip:%s@%s", user, domain)
-
-	// Generate unique identifiers
-	callID := generateCallID(domain)
-	fromTag := generateTag()
-	branch := generateBranch()
-
-	// Resolve From URI
-	fromURI := flags.From
-	if fromURI == "" {
-		fromURI = fmt.Sprintf("sip:%s@%s", user, domain)
-	}
-
-	// Resolve To URI
-	toURI := flags.To
-	if toURI == "" {
-		toURI = requestURI
-	}
-
-	// Resolve Contact URI
-	contactURI := flags.Contact
-	if contactURI == "" {
-		contactURI = fmt.Sprintf("sip:%s@%s", user, domain)
-	}
-
-	// Determine the Via transport tag
 	transport := "TCP"
 	if flags.UseUDP {
 		transport = "UDP"
@@ -52,38 +18,55 @@ func BuildSIPRequest(flags *Flags, target zgrab2.ScanTarget) ([]byte, error) {
 	if flags.UseTLS {
 		transport = "TLS"
 	}
+	return buildSIPRequestInternal(flags, target, transport)
+}
 
+func BuildSIPRequestWithTransport(flags *Flags, target zgrab2.ScanTarget, transport string) ([]byte, error) {
+	return buildSIPRequestInternal(flags, target, transport)
+}
+
+func buildSIPRequestInternal(flags *Flags, target zgrab2.ScanTarget, transport string) ([]byte, error) {
+	host := target.Host()
+	domain := flags.Domain
+	if domain == "" {
+		domain = host
+	}
+	user := flags.User
+
+	requestURI := fmt.Sprintf("sip:%s@%s", user, domain)
+
+	callID := generateCallID(domain)
+	fromTag := generateTag()
+	branch := generateBranch()
+	// Resolve From URI
+	fromURI := flags.From
+	if fromURI == "" {
+		fromURI = fmt.Sprintf("sip:%s@%s", user, domain)
+	}
+
+	toURI := flags.To
+	if toURI == "" {
+		toURI = requestURI
+	}
+
+	contactURI := flags.Contact
+	if contactURI == "" {
+		contactURI = fmt.Sprintf("sip:%s@%s", user, domain)
+	}
 	// Build headers
+
 	var b strings.Builder
 
-	// Request line
 	fmt.Fprintf(&b, "%s %s SIP/2.0\r\n", flags.Method, requestURI)
-
-	// Via
 	fmt.Fprintf(&b, "Via: SIP/2.0/%s %s;branch=%s;rport\r\n", transport, host, branch)
-
-	// Max-Forwards
 	b.WriteString("Max-Forwards: 70\r\n")
-
-	// To
 	fmt.Fprintf(&b, "To: <%s>\r\n", toURI)
-
-	// From (with tag)
 	fmt.Fprintf(&b, "From: <%s>;tag=%s\r\n", fromURI, fromTag)
-
-	// Call-ID
 	fmt.Fprintf(&b, "Call-ID: %s\r\n", callID)
-
-	// CSeq
 	fmt.Fprintf(&b, "CSeq: 1 %s\r\n", flags.Method)
-
-	// Contact
 	fmt.Fprintf(&b, "Contact: <%s>\r\n", contactURI)
-
-	// User-Agent
 	fmt.Fprintf(&b, "User-Agent: %s\r\n", flags.UserAgent)
 
-	// Build SDP body for INVITE if requested
 	var sdpBody string
 	if flags.Method == "INVITE" && !flags.NoSDP {
 		sdpBody = buildSDP(host, user)
@@ -96,10 +79,8 @@ func BuildSIPRequest(flags *Flags, target zgrab2.ScanTarget) ([]byte, error) {
 		b.WriteString("Content-Length: 0\r\n")
 	}
 
-	// End of headers
 	b.WriteString("\r\n")
 
-	// Body
 	if sdpBody != "" {
 		b.WriteString(sdpBody)
 	}
