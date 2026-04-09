@@ -28,8 +28,8 @@ type SIPHeaders struct {
 	CallID        string   `json:"call_id,omitempty"`
 	CSeq          string   `json:"cseq,omitempty"`
 	Via           []string `json:"via,omitempty"`
-	Allow         string   `json:"allow,omitempty"`
-	Supported     string   `json:"supported,omitempty"`
+	Allow         []string   `json:"allow,omitempty"`
+	Supported     []string   `json:"supported,omitempty"`
 	UserAgent     string   `json:"user_agent,omitempty"`
 	Server        string   `json:"server,omitempty"`
 	XSerialNumber string   `json:"x_serialnumber,omitempty"`
@@ -87,7 +87,6 @@ type Codec struct {
 // ParseSIPResponse parses a raw SIP response into a structured SIPResponse.
 func ParseSIPResponse(data []byte) (*SIPResponse, error) {
 	raw := string(data)
-
 	// Split headers and body by double CRLF
 	headerBody := strings.SplitN(raw, "\r\n\r\n", 2)
 	if len(headerBody) == 0 || len(headerBody[0]) == 0 {
@@ -207,18 +206,9 @@ func extractHeaders(raw map[string][]string) *SIPHeaders {
 	h.To = getFirst("to")
 	h.CallID = getFirst("call-id")
 	h.CSeq = getFirst("cseq")
-
-	if viaVals, ok := raw["via"]; ok {
-        cleanedVia := make([]string, 0, len(viaVals))
-        for _, via := range viaVals {
-            // Удаляем параметр received из строки Via
-            cleaned := removeReceivedParam(via)
-            cleanedVia = append(cleanedVia, cleaned)
-        }
-        h.Via = cleanedVia
-    }
-	h.Allow = getFirst("allow")
-	h.Supported = getFirst("supported")
+	h.Via = raw["via"]
+	h.Allow = strings.Split(getFirst("allow"), ", ")
+	h.Supported = strings.Split(getFirst("supported"), ", ")
 	h.UserAgent = getFirst("user-agent")
 	h.Server = getFirst("server")
 	h.Accept = getFirst("accept")
@@ -243,23 +233,6 @@ func extractHeaders(raw map[string][]string) *SIPHeaders {
 	}
 
 	return h
-}
-
-func removeReceivedParam(via string) string {
-    parts := strings.Split(via, ";")
-    if len(parts) <= 1 {
-        return via
-    }
-    
-    // Оставляем первую часть (IP/протокол) и все параметры КРОМЕ received
-    result := []string{parts[0]}
-    for i := 1; i < len(parts); i++ {
-        if ((!strings.HasPrefix(strings.TrimSpace(parts[i]), "received"))&&(!strings.HasPrefix(strings.TrimSpace(parts[i]), "rport"))) {
-            result = append(result, parts[i])
-        }
-    }
-    
-    return strings.Join(result, ";")
 }
 
 func parseSDP(body string) *SDPInfo {

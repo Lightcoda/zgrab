@@ -10,7 +10,7 @@ type ProductInfo struct {
 	Product     string `json:"product"`
 	Version     string `json:"version,omitempty"`
 	FullName    string `json:"fullname,omitempty"`
-	CPE         string `json:"possible CPEs,omitempty"`
+	CPE         []string `json:"candidate_cpes,omitempty"`
 	Category    string `json:"category,omitempty"`
 	Description string `json:"description,omitempty"`
 }
@@ -375,7 +375,7 @@ func FingerprintSIPResponse(resp *SIPResponse) *ProductInfo {
 			
 			// Build CPE with version
 			if fp.cpe != "" {
-				info.CPE = ""
+				info.CPE = []string{}
 				var temp string
 				if version != "" {
 					temp = strings.Replace(fp.cpe, "{version}", version, 1)
@@ -384,8 +384,7 @@ func FingerprintSIPResponse(resp *SIPResponse) *ProductInfo {
 				}
 				
 				for _, vend := range fp.possiblevendors{
-					info.CPE+=strings.Replace(temp, "{vendor}", vend, 1)
-					info.CPE+=" "
+					info.CPE = append(info.CPE, strings.Replace(temp, "{vendor}", vend, 1))
 				}
 			}
 			return info
