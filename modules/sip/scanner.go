@@ -1,13 +1,3 @@
-// Package sip provides a zgrab2 module for scanning SIP (Session Initiation Protocol) servers.
-//
-// The module sends SIP requests (OPTIONS, REGISTER, or INVITE) to targets and parses the
-// structured response, extracting security-relevant information such as:
-//   - Server vendor/version from User-Agent and Server headers
-//   - Supported SIP methods from the Allow header
-//   - SDP media details including codec information
-//   - Security features: SRTP, DTLS-SRTP, ICE support
-//   - Vendor-specific headers (X-Serialnumber, etc.)
-//
 // Usage examples:
 //
 //	echo "192.168.1.1" | zgrab2 sip --port 5060 --method OPTIONS
@@ -16,41 +6,7 @@
 //	echo "192.168.1.1" | zgrab2 sip --port 5060 --method INVITE --domain example.com --user alice
 //	echo "192.168.1.1" | zgrab2 sip --port 5060 --method OPTIONS --retls
 //
-// Example JSON output (abbreviated):
-//
-//	{
-//	  "ip": "192.168.1.1",
-//	  "data": {
-//	    "sip": {
-//	      "status": "success",
-//	      "protocol": "sip",
-//	      "result": {
-//	        "response": {
-//	          "status_line": { "version": "SIP/2.0", "status_code": 200, "reason": "OK" },
-//	          "headers": {
-//	            "user_agent": "Asterisk PBX 18.0.0",
-//	            "server": "Asterisk PBX 18.0.0",
-//	            "allow": "INVITE, ACK, CANCEL, OPTIONS, BYE, REFER, SUBSCRIBE, NOTIFY, INFO",
-//	            "supported": "replaces, timer"
-//	          },
-//	          "sdp": {
-//	            "connection_ip": "192.168.1.1",
-//	            "media_streams": [{ "type": "audio", "port": 10000, "protocol": "RTP/AVP", ... }],
-//	            "supports_srtp": false
-//	          }
-//	        },
-//	        "transport": "udp"
-//	      }
-//	    }
-//	  }
-//	}
-//
-// Security analysis notes:
-//   - User-Agent/Server headers reveal vendor and firmware version for CVE matching
-//   - Allow header shows which methods are enabled (INVITE, REGISTER, etc.)
-//   - SDP analysis reveals media encryption support (SRTP, DTLS-SRTP, ICE)
-//   - X-Serialnumber and other vendor headers can fingerprint device models
-//   - Responses to REGISTER may reveal authentication requirements
+
 package sip
 
 import (
@@ -64,7 +20,7 @@ import (
 	"github.com/zmap/zgrab2"
 )
 
-const defaultSIPPort  uint = 5060
+const defaultSIPPort uint = 5060
 const defaultSIPSPort uint = 5061
 
 // Flags contains the command-line flags for the SIP module.
@@ -74,8 +30,8 @@ type Flags struct {
 	zgrab2.TLSFlags  `group:"TLS Options"`
 
 	// Transport selection
-	UseUDP bool `long:"udp" description:"Use UDP transport (default is TCP)"`
-	UseTLS bool `long:"tls" description:"Use TLS transport (SIPS). Implies TCP."`
+	UseUDP   bool `long:"udp" description:"Use UDP transport (default is TCP)"`
+	UseTLS   bool `long:"tls" description:"Use TLS transport (SIPS). Implies TCP."`
 	RetryTLS bool `long:"retls" description:"If TCP scan fails, retry with TLS: first same port, else 5061"`
 
 	// SIP method(s) — comma-separated list, e.g. "OPTIONS,REGISTER,INVITE"
@@ -109,14 +65,14 @@ type Scanner struct {
 
 // MethodResult holds the result of a single SIP method request.
 type MethodResult struct {
-	Method      string       `json:"method"`
-	Response    *SIPResponse `json:"response,omitempty"`
-	Fingerprint *ProductInfo `json:"fingerprint,omitempty"`
-	RawRequest  string       `json:"raw_request,omitempty" zgrab:"debug"`
-	RawResponse string       `json:"raw_response,omitempty" zgrab:"debug"`
-	Error       string       `json:"error,omitempty"`
-	RetryTLSUsed bool        `json:"retry_tls_used,omitempty"`
-	RetryTLSPort uint        `json:"retry_tls_port,omitempty"`
+	Method       string       `json:"method"`
+	Response     *SIPResponse `json:"response,omitempty"`
+	Fingerprint  *ProductInfo `json:"fingerprint,omitempty"`
+	RawRequest   string       `json:"raw_request,omitempty" zgrab:"debug"`
+	RawResponse  string       `json:"raw_response,omitempty" zgrab:"debug"`
+	Error        string       `json:"error,omitempty"`
+	RetryTLSUsed bool         `json:"retry_tls_used,omitempty"`
+	RetryTLSPort uint         `json:"retry_tls_port,omitempty"`
 }
 
 // Results is the top-level result returned by the SIP scan.
@@ -229,7 +185,7 @@ func (s *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error)
 	methods := s.config.Methods()
 
 	results := &Results{}
-	
+
 	// Determine transport label
 	if s.config.UseTLS {
 		results.Transport = "tls"
@@ -289,7 +245,6 @@ func (s *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error)
 		if results.Transport == "tcp" && s.config.RetryTLS && err != nil {
 			tcpErr := err
 
-
 			currentPort := s.config.BaseFlags.Port
 			if target.Port != nil {
 				currentPort = *target.Port
@@ -339,13 +294,13 @@ func (s *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error)
 			}
 		}
 
-
 		results.Responses = append(results.Responses, mr)
 	}
 
 	return overallStatus, results, overallErr
 }
-//func rewrite tcp error to tls result 
+
+// func rewrite tcp error to tls result
 func (s *Scanner) applyRetrySuccess(
 	mr *MethodResult,
 	results *Results,

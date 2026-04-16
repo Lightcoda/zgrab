@@ -4,10 +4,20 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"net"
 	"strings"
 
 	"github.com/zmap/zgrab2"
 )
+
+func getLocalIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:53")
+	if err != nil {
+		return "127.0.0.1"
+	}
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).IP.String()
+}
 
 // BuildSIPRequest constructs a raw SIP request message based on the given flags and target.
 func BuildSIPRequest(flags *Flags, target zgrab2.ScanTarget) ([]byte, error) {
@@ -27,13 +37,23 @@ func BuildSIPRequestWithTransport(flags *Flags, target zgrab2.ScanTarget, transp
 
 func buildSIPRequestInternal(flags *Flags, target zgrab2.ScanTarget, transport string) ([]byte, error) {
 	host := target.Host()
+	localIP := getLocalIP()
+
+	port := flags.BaseFlags.Port
+	if target.Port != nil && *target.Port != 0 {
+		port = *target.Port
+	}
+	if port == 0 {
+		port = defaultSIPPort // 5060
+	}
+
 	domain := flags.Domain
 	if domain == "" {
 		domain = host
 	}
 	user := flags.User
 
-	requestURI := fmt.Sprintf("sip:%s@%s", user, domain)
+	requestURI := fmt.Sprintf("sip:%s", domain) //requestURI := fmt.Sprintf("sip:%s@%s", user, domain) Don't works with user
 
 	callID := generateCallID(domain)
 	fromTag := generateTag()
@@ -58,10 +78,11 @@ func buildSIPRequestInternal(flags *Flags, target zgrab2.ScanTarget, transport s
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "%s %s SIP/2.0\r\n", flags.Method, requestURI)
-	fmt.Fprintf(&b, "Via: SIP/2.0/%s %s;branch=%s;rport\r\n", transport, host, branch)
+
+	fmt.Fprintf(&b, "Via: SIP/2.0/%s %s:%d;branch=%s;rport\r\n", transport, localIP, port, branch)
 	b.WriteString("Max-Forwards: 70\r\n")
-	fmt.Fprintf(&b, "To: <%s>\r\n", toURI)
 	fmt.Fprintf(&b, "From: <%s>;tag=%s\r\n", fromURI, fromTag)
+	fmt.Fprintf(&b, "To: <%s>\r\n", toURI)
 	fmt.Fprintf(&b, "Call-ID: %s\r\n", callID)
 	fmt.Fprintf(&b, "CSeq: 1 %s\r\n", flags.Method)
 	fmt.Fprintf(&b, "Contact: <%s>\r\n", contactURI)
@@ -70,6 +91,9 @@ func buildSIPRequestInternal(flags *Flags, target zgrab2.ScanTarget, transport s
 	var sdpBody string
 	if flags.Method == "INVITE" && !flags.NoSDP {
 		sdpBody = buildSDP(host, user)
+	}
+	if flags.Method == "OPTIONS" {
+		b.WriteString("Accept: application/sdp\r\n")
 	}
 
 	if sdpBody != "" {
